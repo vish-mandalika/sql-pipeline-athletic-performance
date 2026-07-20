@@ -1,0 +1,11 @@
+USE ACWR;
+
+SHOW TABLES;
+
+SHOW CREATE TABLE athlete;
+SHOW CREATE TABLE body_part;
+SHOW CREATE TABLE daily_soreness;
+SHOW CREATE TABLE injury;
+SHOW CREATE TABLE session_activity;
+SHOW CREATE TABLE training_session;
+SHOW CREATE TABLE wellness;
