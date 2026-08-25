@@ -48,3 +48,51 @@ FROM session_activity
 LEFT JOIN training_session ON session_activity.session_id = training_session.session_id
 WHERE training_session.session_id IS NULL
 ;
+
+-- NULL audit checks
+-- 3 nulls
+SELECT COUNT(*) - COUNT(athlete.max_heart_rate) AS max_heart_rate_nulls 
+FROM athlete
+;
+
+-- 0 nulls
+SELECT COUNT(*) - COUNT(body_part.body_part_name) AS body_part_name_nulls
+FROM body_part
+;
+
+-- 0 nulls
+SELECT
+  COUNT(*) - COUNT(fatigue)          AS fatigue_nulls,
+  COUNT(*) - COUNT(mood)             AS mood_nulls,
+  COUNT(*) - COUNT(readiness)        AS readiness_nulls,
+  COUNT(*) - COUNT(sleep_quality)    AS sleep_quality_nulls,
+  COUNT(*) - COUNT(stress)           AS stress_nulls,
+  COUNT(*) - COUNT(soreness)         AS soreness_nulls,
+  COUNT(*) - COUNT(sleep_duration_h) AS sleep_duration_h_nulls
+FROM wellness
+;
+
+-- 0 nulls
+SELECT
+  COUNT(*) - COUNT(rpe)          AS rpe_nulls,
+  COUNT(*) - COUNT(duration_min)             AS duration_min_nulls,
+  COUNT(*) - COUNT(session_load)        AS session_load_nulls,
+  COUNT(*) - COUNT(participation_mode)           AS participation_mode_nulls
+FROM training_session
+  ;
+  
+-- Checking for childless parents to view legimately empty rows (opposite direction of the orphan checks)
+-- Session 528 does not have child row
+SELECT *
+FROM training_session 
+LEFT JOIN session_activity ON training_session.session_id = session_activity.session_id
+WHERE session_activity.session_id IS NULL
+;
+
+-- 1370 wellness reports have no soreness codes
+-- 1745 total rows - 1370 childless rows = 375 reports (matches length distribution found in the notebook)
+SELECT COUNT(*)
+FROM wellness
+LEFT JOIN soreness_report ON wellness.wellness_id = soreness_report.wellness_id
+WHERE soreness_report.wellness_id IS NULL
+;
