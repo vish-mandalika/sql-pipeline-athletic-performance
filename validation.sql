@@ -96,3 +96,51 @@ FROM wellness
 LEFT JOIN soreness_report ON wellness.wellness_id = soreness_report.wellness_id
 WHERE soreness_report.wellness_id IS NULL
 ;
+
+-- Distribution check for activities
+-- 705 sessions with 1 activity, 62 with 2 and 4 with 3
+SELECT activities, COUNT(*) AS sessions
+FROM (
+  SELECT session_id, COUNT(*) AS activities
+  FROM session_activity
+  GROUP BY session_id
+) AS per_session
+GROUP BY activities
+ORDER BY activities
+;
+
+-- Distribution check for soreness codes per report
+-- From 1 to 7 soreness codes per report (mode is 2 codes with 133 reports)
+SELECT codes, COUNT(*) AS reports
+FROM (
+SELECT wellness_id, COUNT(*) AS codes
+FROM soreness_report
+GROUP BY wellness_id
+) AS per_report
+GROUP BY codes
+ORDER BY codes
+;
+
+-- Distribution check for number of sessions per athlete
+-- p16 has 11 emptry srpe entries which are dropped in transform
+SELECT athlete_id, COUNT(*) AS sessions
+FROM training_session
+GROUP BY athlete_id
+ORDER BY sessions
+;
+
+-- Distribution check for number of injury reports per athlete
+-- Only 9 athletes have reported injuries
+SELECT athlete_id, COUNT(*) AS injury_reports
+FROM injuries
+GROUP BY athlete_id
+ORDER BY injury_reports
+;
+
+-- Distribution check for number of wellness reports per athlete
+-- All 16 athletes have reported wellness ranging from 72 - 147
+SELECT athlete_id, COUNT(*) AS wellness_reports
+FROM wellness
+GROUP BY athlete_id
+ORDER BY wellness_reports
+;
