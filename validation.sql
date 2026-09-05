@@ -144,3 +144,21 @@ FROM wellness
 GROUP BY athlete_id
 ORDER BY wellness_reports
 ;
+
+
+-- Do athletes log multiple sessions in a day?
+-- 1 or 2 sessions max a day
+SELECT sessions, COUNT(*) AS days
+FROM (
+  SELECT athlete_id, COUNT(*) AS sessions
+  FROM training_session
+  GROUP BY athlete_id, DATE(end_time)
+) AS per_athlete_day
+GROUP BY sessions
+ORDER BY sessions
+;
+
+SELECT athlete_id, DATE(end_time) as dt_day, session_load
+FROM training_session
+WHERE DATE(end_time) = '2019-11-08'
+;
