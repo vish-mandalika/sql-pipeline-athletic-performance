@@ -27,11 +27,18 @@ Acute:Chronic Workload Ratio (ACWR) analysis against injury reports.
 | `training_session` | 772 | one row per training session |
 | `session_activity` | 841 | one row per activity type per session |
 
+Two views sit on top:
+
+| View | Grain |
+|---|---|
+| `daily_load` | 719 | one row per athlete per *training* day |
+| `acwr_daily` | 1,737 | one row per athlete per *calendar* day on their spine |
+
 ---
 
 ## Architecture
 
-Four artifacts with separate responsibilities:
+Five artifacts with separate responsibilities:
 
 - **`schema.sql`** owns structure. Drop-then-recreate, run in MySQL Workbench.
 - **`etl.ipynb`** owns data. Extract → Transform → Load, run top to bottom.
@@ -39,9 +46,12 @@ Four artifacts with separate responsibilities:
   expected result and a non-zero is a defect.
 - **`exploration.sql`** explores. One-off analyses behind specific design
   decisions. No expected results — output is a finding, not a pass/fail.
+- **`acwr.sql`** analyzes. Builds the two views, verifies them, and runs the
+  injury join.
 
-That last split is deliberate. `validation.sql` is only useful if every annotated
-zero in it is a verified claim, so queries with no expected result live elsewhere.
+The validation/exploration split is deliberate. `validation.sql` is only useful if
+every annotated zero in it is a verified claim, so queries with no expected result
+live elsewhere.
 
 The notebook is deliberately *not* self-sufficient for re-runs. It loads with
 `if_exists="append"`, so re-running it against a populated database raises a
@@ -62,6 +72,7 @@ pip install -r requirements.txt
 3. Run `schema.sql` in MySQL Workbench (Ctrl+Shift+Enter runs the whole script).
 4. Restart & Run All in `etl.ipynb`.
 5. Run `validation.sql` in Workbench.
+6. Run `acwr.sql` in Workbench.
 
 Steps 3 and 4 must happen in that order. Repeat both to rebuild from scratch.
 
@@ -134,9 +145,6 @@ The natural keys hold at the reduced precision, which the load's success confirm
 
 ## ACWR layer
 
-> **Status: design decisions taken, implementation pending.** This section records
-> the decisions and the evidence behind them. Update when the layer is built.
-
 ACWR divides a 7-day acute load (fatigue proxy) by a 28-day chronic load expressed
 as average weekly load (fitness proxy). Session load is session-RPE — RPE ×
 duration, an *internal* load measure — materialized at transform because it is the
@@ -145,7 +153,7 @@ primitive every window query sums over.
 **Chronic load is a 28-day mean scaled to a week, not a 28-day sum.** Numerator and
 denominator have to be commensurate per-week quantities or the ratio's scale is
 meaningless; a raw 28-day sum puts ratios near 0.25 and the published reference
-bands no longer apply.
+bands no longer apply. In practice this collapses to the 28-day total ÷ 4.
 
 **ACWR is a property of a calendar day, not of a session.** ACWR is designed as a
 monitoring signal — something read on a given day to inform a decision about that
@@ -167,9 +175,9 @@ taken on evidence (`exploration.sql`):
 - No athlete with injury reports lacks a session range, so there is no athlete for
   whom a spine cannot be built.
 - Only three injury check-ins precede an athlete's first session, by 1–6 days, and
-  all fall inside the warmup window where ACWR is `NULL` regardless.
+  all fall inside the warmup window.
 - Only one athlete (5) reports injuries after their last session: five check-ins
-  across 33 days, eight injury rows.
+  across 33 days, five injury rows.
 - Two athletes logged 2 and 3 sessions respectively across the five-month window
   while logging wellness throughout. Their non-training days are not evidenced as
   rest — the more likely reading is that they used one form and not the other.
@@ -186,24 +194,155 @@ is consistent with the measure rather than merely convenient.
 
 p16 produces no ACWR rows at all, having no sessions.
 
-**Verification is by hand-computed expected values.** Window functions fail quietly:
-a wrong frame boundary produces plausible numbers and no constraint catches it. Acute
-and chronic are checked against manual computations for specific athlete-days rather
-than by inspecting output.
+### Two rules qualify the ratio
+
+Both are named in `acwr_daily.acwr_status`. A bare `NULL` would conflate them, and
+the rules' own inputs (`sessions_in_chronic_window`, `days_since_spine_start`) are
+exposed alongside it so a reader can recompute either condition without reading the
+SQL.
+
+- `sparse_window` — fewer than **4 sessions** in the 28-day frame. The ratio is
+  `NULL`. The threshold comes from the construct rather than from this dataset: a
+  four-week average should rest on at least one session per week it averages. It
+  happens to fall in a clean empirical gap too — three athletes train at 0.5–0.6
+  sessions/week and the rest at 1.8–5.6 — but the rule does not depend on that.
+- `partial_window` — fewer than 28 calendar days of spine history. The ratio is
+  **computed and marked**, not hidden. It remains dimensionally valid (both sides
+  are still per-week) but rests on a shorter baseline. Marking rather than nulling
+  follows the same principle as the injury `{}` rows: keep the information, make the
+  judgment explicit downstream.
+
+The guard is row-level rather than athlete-level by design. Sparsity is a property of
+each 28-day window, not of an athlete — a dense athlete with a three-week gap has the
+same unreliable denominator for those rows. An athlete-level cutoff would miss that,
+and would be a statement about which athletes to include rather than about when a
+baseline is estimable.
+
+Precedence is declared rather than left to evaluation order: `sparse_window` ranks
+first, because it says the baseline is not estimable at all where `partial_window`
+only says it is short.
+
+### Status distribution
+
+Across 1,737 athlete-days:
+
+| Status | Days | Share |
+|---|---|---|
+| `ok` | 1,160 | 66.8% |
+| `partial_window` | 216 | 12.4% |
+| `sparse_window` | 361 | 20.8% |
+
+**A fifth of the series carries no ratio.** That is a finding about the dataset, not
+a defect: this data is too sparse to support ACWR on a sizeable minority of days.
+Three athletes account for most of it — athlete 13 is `sparse_window` on 128 of 129
+days, athlete 9 on all 40, athlete 3 on all 7.
+
+### Verification
+
+Window functions fail quietly: a wrong frame boundary produces plausible numbers and
+no constraint catches it.
+
+**Reconciliations.** Row count equals the sum of per-athlete spine lengths (1,737).
+`SUM(daily_load)` across the spine equals `SUM(session_load)` in `training_session`
+(272,220 both sides), so the spine join neither lost nor duplicated rows.
+`SUM(session_count)` equals 772.
+
+**Hand computations**, each chosen for a different boundary:
+
+| Athlete-day | Tests | Result |
+|---|---|---|
+| 13, 2020-03-18 | guard at its threshold (exactly 4 sessions); current row included in both frames | 0.875 ✓ |
+| 4, 2019-11-28 | far boundary (a session at exactly 27 days back, correctly in); `partial_window` → `ok` transition; future sessions excluded | 1.030 ✓ |
+| 5, 2020-01-15 | day after a 10-day gap, where `ROWS` and `RANGE` diverge most | 0.652 ✓ |
+
+Two further boundary tests come from the series itself rather than a separate query.
+Athlete 4's 540-load session on 2019-12-14 leaves the acute frame on 2019-12-21
+(acute drops 1,180 → 640) and leaves the chronic frame on 2020-01-11 (chronic drops
+1,065.00 → 930.00, a fall of 135, which is 540 ÷ 4). Both land exactly where the
+frame definitions say they should.
+
+A guard that cannot fire would look identical to a clean result, so
+`MIN(sessions_in_chronic_window)` is checked explicitly. It returns 0, confirming the
+guard sums carried session counts rather than counting spine rows.
+
+---
+
+## Injury correlation
+
+**This is a demonstration of method, not a finding.** The numbers below are reported
+because showing the join's yield and its result is more honest than reporting only
+that a join exists.
+
+### Join yield
+
+| | Count |
+|---|---|
+| Injury rows | 111 |
+| → on an athlete's spine | 103 |
+| → with a non-null ACWR | 83 |
+| Injury check-ins | 77 |
+| → with a non-null ACWR | 55 (71%) |
+
+Both losses trace to documented decisions. Eight rows fall off the spine entirely:
+five of athlete 5's trailing reports and three leading-edge reports. A further twenty
+land on the spine but in a `sparse_window`. Nothing is lost for an unexplained reason.
+
+All nine injury-reporting athletes retain usable `ok` days, so the subset survives
+intact — the sparse loggers the guard was built for are not among them. The rule that
+excludes the most data excludes almost none of the data this analysis uses.
+
+### Result
+
+Comparing the 1,376 athlete-days where ACWR exists, split by whether an injury was
+reported that day:
+
+| | Athlete-days | Mean ACWR | Days > 1.5 | Mean acute | Mean chronic |
+|---|---|---|---|---|---|
+| No injury report | 1,323 | 0.985 | 168 (12.7%) | 1,286.4 | 1,306.0 |
+| Injury report | 53 | 0.890 | 8 (15.1%) | 1,127.5 | 1,361.1 |
+
+Acute and chronic are reported separately as well as the ratio, because the ratio
+discards what its components say apart: 300→450 AU and 3,000→4,500 AU both give 1.5
+and describe entirely different situations.
+
+### Interpretation
+
+**The direction is opposite to the ACWR hypothesis.** Injury-report days show *lower*
+acute load, *higher* chronic load and a *lower* mean ratio than other days. Nothing
+here supports spike-associated injury risk, and the 15.1% vs 12.7% figure above 1.5
+turns on eight days against 168 — a single day moves it nearly two points.
+
+Three reasons not to read anything into it, in order of weight:
+
+1. **The join is same-day, and the construct is not.** Published ACWR work looks at
+   load in the days *preceding* an injury. An injury reported on day X often follows
+   reduced or ceased training, so acute load is already depressed by the time the
+   report lands. This join measures the consequence, not the antecedent. That alone
+   is enough to explain the direction.
+2. **n = 53, and it is dominated by one athlete.** Athlete 12 contributes 48 of 77
+   check-ins and 77 of 111 injury rows — 69% of the injury data in the dataset. Most
+   of what the table above compares is one person's reporting behaviour. Athlete 12
+   also reports ~1.6 body parts per check-in where most athletes report one, which is
+   a difference in form usage rather than necessarily in injury rate.
+3. **Severity is self-labeled** on a two-value scale, with no clinical definition and
+   no way to distinguish a niggle from a layoff.
+
+So the result is neither evidence against ACWR nor evidence for it. It is evidence
+that a same-day join answers a different question than the construct asks. The
+correct design — computing ACWR over the window preceding each report — is a next
+step, not something this layer claims to have done.
 
 ### What this analysis can and cannot show
 
-The injury join is a **demonstration of method, not a finding**. Sixteen recreational
-athletes, 772 sessions, injuries for nine, self-labeled severity, one collection
-window. That is not enough to test an injury-risk hypothesis, and any correlation
-found would be uninterpretable. Published ACWR work uses squad-seasons of monitored
-professional athletes.
+Sixteen recreational athletes, 772 sessions, injuries for nine, self-labeled severity,
+one collection window. That is not enough to test an injury-risk hypothesis, and any
+correlation found would be uninterpretable. Published ACWR work uses squad-seasons of
+monitored professional athletes.
 
 ACWR itself is contested. The 7 acute days sit inside the 28 chronic days, so the
 numerator is a component of the denominator — a coupling that generates correlation
 structure independent of any biological effect. The ratio also discards what its two
-components say separately: 300→450 AU and 3000→4500 AU give the same 1.5 and describe
-entirely different situations. Consensus moved against ACWR as a standalone decision
+components say separately. Consensus moved against ACWR as a standalone decision
 tool. It is implemented here as the analytical target the schema was built to support,
 not as a claim about these athletes.
 
@@ -257,15 +396,21 @@ what can be concluded from it:
   **2 to 113** per athlete across the same five-month window — a 50× spread. Two
   athletes (3 and 9) logged 2 and 3 sessions respectively while continuing to submit
   wellness reports for a further 91 and 79 days. Those are almost certainly not
-  complete training records, and any ACWR computed for them describes form usage
-  rather than training. This is the limitation that bears most directly on the
-  analytical layer.
-- **Injury data exists for only 9 of 16 athletes.** ACWR-to-injury correlation is
-  computable for that subset only. p08 has no `injury.csv` at all.
-- **Five injury check-ins fall outside the ACWR spine.** Athlete 5 reported injuries
-  from 1 to 33 days after their last logged session. Under per-athlete spine bounds
-  those reports have no ACWR row to join to and are excluded from the correlation.
-  This is a consequence of a deliberate decision, documented above, not an oversight.
+  complete training records. This is the limitation that bears most directly on the
+  analytical layer: it is why the sparse-window guard exists, and why 20.8% of
+  athlete-days carry no ratio.
+- **Injury reporting is dominated by one athlete.** Athlete 12 accounts for 69% of
+  injury rows and 62% of check-ins. Any cohort-level injury statistic is largely a
+  statement about that one participant.
+- **Injury data exists for only 9 of 16 athletes.** p08 has no `injury.csv` at all.
+- **Only 71% of injury check-ins reach a usable ACWR value.** Eight injury rows fall
+  outside the spine (five of athlete 5's trailing reports, three leading-edge) and a
+  further twenty sit in a `sparse_window`. Both are consequences of deliberate
+  decisions documented above, not oversights.
+- **The injury join is same-day.** ACWR is matched to the day a report was submitted,
+  not to the window preceding it. This is the wrong direction for the construct and
+  is the most likely explanation for the result reported above. Correcting it is a
+  next step.
 - **p16 has no training sessions.** All 11 of its srpe entries were empty
   submissions, dropped in transform (verified against the raw file by timestamp).
   p16 therefore appears in no session-based output at all, including the ACWR layer.
@@ -311,10 +456,12 @@ data/pmdata/
 
 ## Next steps
 
-- Implement the ACWR layer as views: daily load aggregation → per-athlete date spine
-  → rolling acute and chronic windows → ratio
-- Decide whether athletes below a minimum session count are excluded from the ACWR
-  layer or included and flagged
-- Decide whether the chronic window's first 27 days return `NULL` or a partial value
-- Injury correlation against ACWR spikes for the 9-athlete subset
+- Lag the injury join: compute ACWR over the window *preceding* each report rather
+  than on the report date, which is what the construct actually describes
+- Report the injury comparison with athlete 12 excluded, to show how much of it is
+  one participant
+- Uncoupled ACWR (7-day acute against the prior 21 days) as a check on the
+  mathematical coupling between numerator and denominator
 - Daily-grain wellness view, aggregating the report-grain base tables
+- Join soreness to injury by body part, once the lateralization granularity decision
+  is made

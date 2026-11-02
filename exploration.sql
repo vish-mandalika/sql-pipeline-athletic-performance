@@ -118,3 +118,22 @@ LEFT JOIN (
 GROUP BY t.athlete_id, w.last_wellness
 ORDER BY last_session
 ;
+
+-- Spine length vs. the 28-day chronic window.
+-- Per-athlete spine bounds mean each athlete's ACWR series runs first session to
+-- last session. An athlete whose spine is shorter than 28 days can never produce
+-- a non-null ACWR under the warmup rule, so the bounds decision already excludes
+-- them without a separate session-count threshold. This quantifies that.
+SELECT
+  athlete_id,
+  COUNT(*)                                            AS sessions,
+  MIN(DATE(end_time))                                 AS first_session,
+  MAX(DATE(end_time))                                 AS last_session,
+  DATEDIFF(MAX(DATE(end_time)), MIN(DATE(end_time))) + 1 AS spine_days,
+  GREATEST(DATEDIFF(MAX(DATE(end_time)), MIN(DATE(end_time))) + 1 - 27, 0)
+                                                      AS acwr_days_available,
+  COUNT(DISTINCT DATE(end_time))                      AS training_days
+FROM training_session
+GROUP BY athlete_id
+ORDER BY spine_days
+;
